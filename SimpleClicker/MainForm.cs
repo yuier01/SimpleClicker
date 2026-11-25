@@ -1,284 +1,616 @@
-﻿using System;
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using SimpleClicker.UI;
 
 namespace SimpleClicker
 {
     public partial class MainForm : Form
     {
-        private bool isRunning = false;
-        private AppConfig config;
-        private bool isHotkeySetMode = false;
-        private Keys tempHotkey = Keys.None; // 临时存储新热键
-        private Thread clickThread = null;
-        private CancellationTokenSource cancellationTokenSource = null;
-        private GlobalKeyboardHook keyboardHook;
+        private const int CardWidth = 440;
+        private const int CardHeight = 376;
+        private const int WM_NCLBUTTONDOWN = 0x00A1;
+        private const int HTCAPTION = 0x0002;
+        private const int CS_DROPSHADOW = 0x00020000;
 
-        private TextBox txtHotkey;
-        private Button btnSetHotkey;
-        private Button btnConfirmHotkey;
-        private Button btnCancelHotkey;
-        private Label lblStatus;
-        private NumericUpDown nudInterval;
-        private ComboBox cmbButton;
+        private readonly AppConfig config;
+
+        private bool isRunning;
+        private bool isHotkeySetMode;
+        private Keys tempHotkey = Keys.None;
+        private Thread clickThread;
+        private CancellationTokenSource cancellationTokenSource;
+        private GlobalKeyboardHook keyboardHook;
+        private Region roundedRegion;
+
+        private readonly Font titleFont;
+        private readonly Font subtitleFont;
+        private readonly Font labelFont;
+        private readonly Font smallFont;
+        private readonly Font buttonFont;
+        private readonly Font compactButtonFont;
+        private readonly Font numberFont;
+        private readonly Font statusFont;
+        private readonly Font heroSubFont;
+        private readonly Font sectionFont;
+        private readonly Font footerFont;
+
+        private WindowIconButton minimizeButton;
+        private WindowIconButton closeButton;
+        private ThemedButton startStopButton;
+        private IntervalStepper intervalInput;
+        private SegmentControl mouseButtons;
+        private HotkeyChip hotkeyChip;
+        private ThemedButton setHotkeyButton;
+        private ThemedButton confirmHotkeyButton;
+        private ThemedButton cancelHotkeyButton;
+        private ToolTip toolTip;
+
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         public MainForm()
         {
-            // 加载配置
             config = ConfigManager.Load();
-            
-            // 初始化控件
+
+            titleFont = new Font(Theme.DisplayFontFamily, 11F, FontStyle.Bold, GraphicsUnit.Point);
+            subtitleFont = new Font(Theme.UiFontFamily, 8F, FontStyle.Regular, GraphicsUnit.Point);
+            labelFont = new Font(Theme.UiFontFamily, 9F, FontStyle.Regular, GraphicsUnit.Point);
+            smallFont = new Font(Theme.UiFontFamily, 8F, FontStyle.Regular, GraphicsUnit.Point);
+            buttonFont = new Font(Theme.UiFontFamily, 9F, FontStyle.Bold, GraphicsUnit.Point);
+            compactButtonFont = new Font(Theme.UiFontFamily, 8.5F, FontStyle.Bold, GraphicsUnit.Point);
+            numberFont = new Font(Theme.DisplayFontFamily, 10F, FontStyle.Bold, GraphicsUnit.Point);
+            statusFont = new Font(Theme.UiFontFamily, 11F, FontStyle.Bold, GraphicsUnit.Point);
+            heroSubFont = new Font(Theme.UiFontFamily, 8F, FontStyle.Regular, GraphicsUnit.Point);
+            sectionFont = new Font(Theme.UiFontFamily, 8F, FontStyle.Bold, GraphicsUnit.Point);
+            footerFont = new Font(Theme.UiFontFamily, 8F, FontStyle.Regular, GraphicsUnit.Point);
+
+            InitializeWindow();
             InitializeControls();
-            
-            // 启动全局键盘钩子
+            InitializeHook();
+        }
+
+        private void InitializeWindow()
+        {
+            Text = "SimpleClicker - 鼠标连点器";
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.CenterScreen;
+            ShowInTaskbar = true;
+            ShowIcon = false;
+            MaximizeBox = false;
+            MinimizeBox = true;
+            AutoScaleMode = AutoScaleMode.None;
+            ClientSize = new Size(CardWidth, CardHeight);
+            BackColor = Color.White;
+            Font = labelFont;
+            DoubleBuffered = true;
+            SetStyle(
+                ControlStyles.UserPaint |
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.ResizeRedraw,
+                true);
+        }
+
+        private void InitializeControls()
+        {
+            minimizeButton = new WindowIconButton
+            {
+                Kind = WindowIconKind.Minimize,
+                Bounds = new Rectangle(370, 10, 26, 26),
+                AccessibleName = "最小化"
+            };
+            minimizeButton.Clicked += MinimizeButton_Clicked;
+
+            closeButton = new WindowIconButton
+            {
+                Kind = WindowIconKind.Close,
+                Bounds = new Rectangle(398, 10, 26, 26),
+                AccessibleName = "关闭"
+            };
+            closeButton.Clicked += CloseButton_Clicked;
+
+            startStopButton = new ThemedButton
+            {
+                Bounds = new Rectangle(276, 78, 132, 42),
+                Text = "开始连点",
+                Style = ButtonStyle.Primary,
+                Font = buttonFont,
+                BackColor = Theme.HeroFill,
+                AccessibleName = "开始或停止连点"
+            };
+            startStopButton.Clicked += StartStopButton_Clicked;
+
+            intervalInput = new IntervalStepper
+            {
+                Bounds = new Rectangle(150, 180, 274, 38),
+                Minimum = 1,
+                Maximum = 99999,
+                Value = config.Interval,
+                Font = numberFont,
+                AccessibleName = "连点间隔，单位毫秒"
+            };
+            intervalInput.ValueChanged += IntervalInput_ValueChanged;
+
+            mouseButtons = new SegmentControl
+            {
+                Bounds = new Rectangle(150, 228, 274, 38),
+                LeftText = "左键",
+                RightText = "右键",
+                SelectedIndex = config.ClickButton == MouseButtons.Left ? 0 : 1,
+                Font = buttonFont,
+                AccessibleName = "连点按键"
+            };
+            mouseButtons.SelectionChanged += MouseButtons_SelectionChanged;
+
+            hotkeyChip = new HotkeyChip
+            {
+                Bounds = new Rectangle(150, 276, 170, 38),
+                Text = GetHotkeyString(config.Hotkey),
+                Font = buttonFont,
+                AccessibleName = "当前启停热键"
+            };
+
+            setHotkeyButton = new ThemedButton
+            {
+                Bounds = new Rectangle(332, 276, 92, 38),
+                Text = "更改",
+                Style = ButtonStyle.Secondary,
+                Font = compactButtonFont,
+                AccessibleName = "更改启停热键"
+            };
+            setHotkeyButton.Clicked += SetHotkeyButton_Clicked;
+
+            confirmHotkeyButton = new ThemedButton
+            {
+                Bounds = new Rectangle(300, 276, 56, 38),
+                Text = "确认",
+                Style = ButtonStyle.Primary,
+                Font = compactButtonFont,
+                Enabled = false,
+                Visible = false,
+                AccessibleName = "确认新的启停热键"
+            };
+            confirmHotkeyButton.Clicked += ConfirmHotkeyButton_Clicked;
+
+            cancelHotkeyButton = new ThemedButton
+            {
+                Bounds = new Rectangle(366, 276, 58, 38),
+                Text = "取消",
+                Style = ButtonStyle.Secondary,
+                Font = compactButtonFont,
+                Visible = false,
+                AccessibleName = "取消设置热键"
+            };
+            cancelHotkeyButton.Clicked += CancelHotkeyButton_Clicked;
+
+            Controls.Add(startStopButton);
+            Controls.Add(intervalInput);
+            Controls.Add(mouseButtons);
+            Controls.Add(hotkeyChip);
+            Controls.Add(setHotkeyButton);
+            Controls.Add(confirmHotkeyButton);
+            Controls.Add(cancelHotkeyButton);
+            Controls.Add(minimizeButton);
+            Controls.Add(closeButton);
+
+            toolTip = new ToolTip
+            {
+                AutoPopDelay = 5000,
+                InitialDelay = 350,
+                ReshowDelay = 100,
+                ShowAlways = true
+            };
+            toolTip.SetToolTip(minimizeButton, "最小化");
+            toolTip.SetToolTip(closeButton, "关闭 SimpleClicker");
+            toolTip.SetToolTip(startStopButton, "开始或停止鼠标连点");
+            toolTip.SetToolTip(intervalInput, "直接输入数字，或点击两侧的 − / + 调整");
+            toolTip.SetToolTip(mouseButtons, "选择连点时按下的鼠标键");
+            toolTip.SetToolTip(hotkeyChip, "当前启停热键");
+            toolTip.SetToolTip(setHotkeyButton, "设置新的启停热键");
+            toolTip.SetToolTip(confirmHotkeyButton, "保存新的启停热键");
+            toolTip.SetToolTip(cancelHotkeyButton, "放弃设置");
+        }
+
+        private void InitializeHook()
+        {
             keyboardHook = new GlobalKeyboardHook(
                 config,
                 OnHotkeyToggle,
                 UpdateHotkeyDisplay,
                 () => isHotkeySetMode,
-                OnKeyDetected
-            );
+                OnKeyDetected);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var parameters = base.CreateParams;
+                parameters.ClassStyle |= CS_DROPSHADOW;
+                return parameters;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            UpdateRoundedRegion();
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            BeginInvoke((MethodInvoker)delegate
+            {
+                ActiveControl = null;
+            });
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            UpdateRoundedRegion();
+        }
+
+        private void UpdateRoundedRegion()
+        {
+            if (!IsHandleCreated || ClientSize.Width <= 0 || ClientSize.Height <= 0)
+            {
+                return;
+            }
+
+            using (var path = Theme.RoundedRect(
+                new RectangleF(0f, 0f, ClientSize.Width, ClientSize.Height),
+                20f))
+            {
+                var newRegion = new Region(path);
+                var oldRegion = roundedRegion;
+                roundedRegion = newRegion;
+                Region = newRegion;
+                if (oldRegion != null)
+                {
+                    oldRegion.Dispose();
+                }
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            var graphics = e.Graphics;
+            Theme.Prepare(graphics);
+            graphics.Clear(Color.White);
+
+            using (var borderPath = Theme.RoundedRect(
+                new RectangleF(0.75f, 0.75f, Width - 1.5f, Height - 1.5f),
+                20f))
+            using (var borderPen = new Pen(Theme.CardBorder, 1.2f))
+            {
+                graphics.DrawPath(borderPen, borderPath);
+            }
+
+            using (var titleBrush = new SolidBrush(Theme.TextPrimary))
+            using (var subtitleBrush = new SolidBrush(Theme.TextMuted))
+            {
+                Theme.DrawLeft(graphics, "SimpleClicker", titleFont, titleBrush, new RectangleF(16f, 5f, 300f, 24f));
+                Theme.DrawLeft(graphics, "鼠标连点器", subtitleFont, subtitleBrush, new RectangleF(16f, 27f, 300f, 16f));
+            }
+
+            DrawSettingsSection(graphics);
+            DrawHero(graphics);
+            DrawFooter(graphics);
+        }
+
+        private void DrawSettingsSection(Graphics graphics)
+        {
+            using (var sectionBrush = new SolidBrush(Theme.SectionText))
+            {
+                Theme.DrawLeft(graphics, "设置", sectionFont, sectionBrush, new RectangleF(16f, 154f, 40f, 16f));
+            }
+
+            using (var dividerPen = new Pen(Theme.Divider, 1f))
+            {
+                graphics.DrawLine(dividerPen, 52f, 162f, 424f, 162f);
+            }
+
+            DrawRowLabel(graphics, "点击间隔", "ms", 180);
+            DrawRowLabel(graphics, "连点按键", null, 228);
+            DrawRowLabel(graphics, "启停热键", null, 276);
+        }
+
+        private void DrawRowLabel(Graphics graphics, string text, string suffix, int top)
+        {
+            using (var labelBrush = new SolidBrush(Theme.TextPrimary))
+            using (var suffixBrush = new SolidBrush(Theme.TextMuted))
+            {
+                var bounds = new RectangleF(16f, top, 128f, 38f);
+                Theme.DrawLeft(graphics, text, labelFont, labelBrush, bounds);
+
+                if (!string.IsNullOrEmpty(suffix))
+                {
+                    var labelSize = graphics.MeasureString(text, labelFont);
+                    var suffixBounds = new RectangleF(16f + labelSize.Width + 2f, top, 36f, 38f);
+                    Theme.DrawLeft(graphics, suffix, smallFont, suffixBrush, suffixBounds);
+                }
+            }
+        }
+
+        private void DrawHero(Graphics graphics)
+        {
+            var hero = new RectangleF(16f, 56f, 408f, 86f);
+            using (var heroPath = Theme.RoundedRect(hero, 14f))
+            using (var heroBrush = new SolidBrush(Theme.HeroFill))
+            using (var heroPen = new Pen(Theme.HeroBorder, 1f))
+            {
+                graphics.FillPath(heroBrush, heroPath);
+                graphics.DrawPath(heroPen, heroPath);
+            }
+
+            var statusColor = isRunning ? Theme.StatusRunning : Theme.StatusIdle;
+            using (var haloBrush = new SolidBrush(Color.FromArgb(36, statusColor)))
+            using (var dotBrush = new SolidBrush(statusColor))
+            {
+                graphics.FillEllipse(haloBrush, 26f, 66f, 20f, 20f);
+                graphics.FillEllipse(dotBrush, 32f, 72f, 8f, 8f);
+            }
+
+            using (var statusBrush = new SolidBrush(Theme.TextPrimary))
+            using (var subtitleBrush = new SolidBrush(Theme.TextMuted))
+            {
+                Theme.DrawLeft(
+                    graphics,
+                    isRunning ? "运行中" : "已停止",
+                    statusFont,
+                    statusBrush,
+                    new RectangleF(46f, 63f, 210f, 26f));
+                Theme.DrawLeft(
+                    graphics,
+                    GetHeroSubtitle(),
+                    heroSubFont,
+                    subtitleBrush,
+                    new RectangleF(46f, 88f, 210f, 18f));
+            }
+        }
+
+        private void DrawFooter(Graphics graphics)
+        {
+            using (var dividerPen = new Pen(Theme.Divider, 1f))
+            {
+                graphics.DrawLine(dividerPen, 16f, 330f, 424f, 330f);
+            }
+
+            using (var footerBrush = new SolidBrush(Theme.TextMuted))
+            {
+                Theme.DrawCentered(
+                    graphics,
+                    "热键可随时启停 · 更改自动保存",
+                    footerFont,
+                    footerBrush,
+                    new RectangleF(16f, 340f, 408f, 18f));
+            }
+        }
+
+        private string GetHeroSubtitle()
+        {
+            string hotkey = GetHotkeyString(config.Hotkey);
+            string button = config.ClickButton == MouseButtons.Left ? "左键" : "右键";
+
+            if (isRunning)
+            {
+                return "每 " + config.Interval + " ms 点击" + button + " · 按 " + hotkey + " 停止";
+            }
+
+            return "按 " + hotkey + " 或点击右侧开始";
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && e.Y < 48)
+            {
+                ReleaseCapture();
+                SendMessage(Handle, WM_NCLBUTTONDOWN, new IntPtr(HTCAPTION), IntPtr.Zero);
+            }
+
+            base.OnMouseDown(e);
+        }
+
+        private void MinimizeButton_Clicked(object sender, EventArgs e)
+        {
+            WindowState = FormWindowState.Minimized;
+        }
+
+        private void CloseButton_Clicked(object sender, EventArgs e)
+        {
+            Close();
+        }
+
+        private void StartStopButton_Clicked(object sender, EventArgs e)
+        {
+            if (isRunning)
+            {
+                StopClicking();
+            }
+            else
+            {
+                StartClicking();
+            }
+        }
+
+        private void IntervalInput_ValueChanged(object sender, EventArgs e)
+        {
+            config.Interval = intervalInput.Value;
+            ConfigManager.Save(config);
+            Invalidate();
+        }
+
+        private void MouseButtons_SelectionChanged(object sender, EventArgs e)
+        {
+            config.ClickButton = mouseButtons.SelectedIndex == 0 ? MouseButtons.Left : MouseButtons.Right;
+            ConfigManager.Save(config);
+            Invalidate();
+        }
+
+        private void SetHotkeyButton_Clicked(object sender, EventArgs e)
+        {
+            BeginHotkeyCapture();
+        }
+
+        private void ConfirmHotkeyButton_Clicked(object sender, EventArgs e)
+        {
+            if (tempHotkey == Keys.None)
+            {
+                return;
+            }
+
+            config.Hotkey = tempHotkey;
+            ConfigManager.Save(config);
+            EndHotkeyCapture();
+        }
+
+        private void CancelHotkeyButton_Clicked(object sender, EventArgs e)
+        {
+            EndHotkeyCapture();
+        }
+
+        private void BeginHotkeyCapture()
+        {
+            if (isHotkeySetMode)
+            {
+                return;
+            }
+
+            isHotkeySetMode = true;
+            tempHotkey = Keys.None;
+            hotkeyChip.IsCapturing = true;
+            hotkeyChip.Text = "按下组合键…";
+            setHotkeyButton.Visible = false;
+            confirmHotkeyButton.Visible = true;
+            confirmHotkeyButton.Enabled = false;
+            cancelHotkeyButton.Visible = true;
+            ApplyHotkeyLayout();
+            Invalidate();
+        }
+
+        private void EndHotkeyCapture()
+        {
+            isHotkeySetMode = false;
+            hotkeyChip.IsCapturing = false;
+            hotkeyChip.Text = GetHotkeyString(config.Hotkey);
+            setHotkeyButton.Visible = true;
+            confirmHotkeyButton.Visible = false;
+            confirmHotkeyButton.Enabled = false;
+            cancelHotkeyButton.Visible = false;
+            ApplyHotkeyLayout();
+            Invalidate();
+        }
+
+        private void ApplyHotkeyLayout()
+        {
+            if (isHotkeySetMode)
+            {
+                hotkeyChip.Bounds = new Rectangle(150, 276, 140, 38);
+                confirmHotkeyButton.Bounds = new Rectangle(300, 276, 56, 38);
+                cancelHotkeyButton.Bounds = new Rectangle(366, 276, 58, 38);
+            }
+            else
+            {
+                hotkeyChip.Bounds = new Rectangle(150, 276, 170, 38);
+                setHotkeyButton.Bounds = new Rectangle(332, 276, 92, 38);
+            }
         }
 
         private void OnHotkeyToggle(bool state)
         {
-            this.Invoke((MethodInvoker)delegate
+            Invoke((MethodInvoker)delegate
             {
-                if (lblStatus != null)
+                if (isRunning)
                 {
-                    if (isRunning)
-                        StopClicking(lblStatus);
-                    else
-                        StartClicking(lblStatus);
+                    StopClicking();
+                }
+                else
+                {
+                    StartClicking();
                 }
             });
         }
 
         private void UpdateHotkeyDisplay(string text)
         {
-            this.Invoke((MethodInvoker)delegate
+            Invoke((MethodInvoker)delegate
             {
-                txtHotkey.Text = text;
+                if (hotkeyChip != null && isHotkeySetMode)
+                {
+                    hotkeyChip.Text = text;
+                }
             });
         }
 
         private void OnKeyDetected(Keys key)
         {
             tempHotkey = key;
-            this.Invoke((MethodInvoker)delegate
+            Invoke((MethodInvoker)delegate
             {
-                txtHotkey.Text = GetHotkeyString(tempHotkey);
-                btnConfirmHotkey.Enabled = true;
+                if (hotkeyChip == null)
+                {
+                    return;
+                }
+
+                hotkeyChip.Text = GetHotkeyString(tempHotkey);
+                confirmHotkeyButton.Enabled = true;
             });
-        }
-
-        private void InitializeControls()
-        {
-            this.Text = "SimpleClicker - 鼠标连点器";
-            this.Size = new System.Drawing.Size(400, 350);
-            this.StartPosition = FormStartPosition.CenterScreen;
-            this.FormBorderStyle = FormBorderStyle.FixedSingle;
-            this.MaximizeBox = false;
-
-            // 间隔设置
-            Label lblInterval = new Label()
-            {
-                Text = "连点间隔(毫秒):",
-                Location = new System.Drawing.Point(20, 20),
-                Size = new System.Drawing.Size(120, 20)
-            };
-
-            nudInterval = new NumericUpDown()
-            {
-                Location = new System.Drawing.Point(150, 20),
-                Size = new System.Drawing.Size(100, 20),
-                Minimum = 1,
-                Maximum = 99999,
-                Value = config.Interval
-            };
-            nudInterval.ValueChanged += (s, e) => 
-            {
-                config.Interval = (int)nudInterval.Value;
-                ConfigManager.Save(config); // 保存配置
-            };
-
-            // 连点按钮选择
-            Label lblButton = new Label()
-            {
-                Text = "连点按键:",
-                Location = new System.Drawing.Point(20, 60),
-                Size = new System.Drawing.Size(120, 20)
-            };
-
-            cmbButton = new ComboBox()
-            {
-                Location = new System.Drawing.Point(150, 60),
-                Size = new System.Drawing.Size(100, 20),
-                DropDownStyle = ComboBoxStyle.DropDownList
-            };
-            cmbButton.Items.Add("左键");
-            cmbButton.Items.Add("右键");
-            cmbButton.SelectedIndex = config.ClickButton == MouseButtons.Left ? 0 : 1;
-            cmbButton.SelectedIndexChanged += (s, e) =>
-            {
-                config.ClickButton = cmbButton.SelectedIndex == 0 ? MouseButtons.Left : MouseButtons.Right;
-                ConfigManager.Save(config); // 保存配置
-            };
-
-            // 热键设置
-            Label lblHotkey = new Label()
-            {
-                Text = "启停热键:",
-                Location = new System.Drawing.Point(20, 100),
-                Size = new System.Drawing.Size(120, 20)
-            };
-
-            txtHotkey = new TextBox()
-            {
-                Location = new System.Drawing.Point(150, 100),
-                Size = new System.Drawing.Size(100, 20),
-                ReadOnly = true,
-                Text = GetHotkeyString(config.Hotkey) // 显示加载的热键
-            };
-
-            btnSetHotkey = new Button()
-            {
-                Text = "设置",
-                Location = new System.Drawing.Point(260, 100),
-                Size = new System.Drawing.Size(60, 20)
-            };
-            btnSetHotkey.Click += BtnSetHotkey_Click;
-
-            btnConfirmHotkey = new Button()
-            {
-                Text = "确认",
-                Location = new System.Drawing.Point(260, 130),
-                Size = new System.Drawing.Size(60, 20)
-            };
-            btnConfirmHotkey.Click += BtnConfirmHotkey_Click;
-            btnConfirmHotkey.Enabled = false;
-
-            btnCancelHotkey = new Button()
-            {
-                Text = "取消",
-                Location = new System.Drawing.Point(260, 160),
-                Size = new System.Drawing.Size(60, 20)
-            };
-            btnCancelHotkey.Click += BtnCancelHotkey_Click;
-            btnCancelHotkey.Enabled = false;
-
-            // 状态显示
-            lblStatus = new Label()
-            {
-                Text = "状态: 停止",
-                Location = new System.Drawing.Point(20, 180),
-                Size = new System.Drawing.Size(200, 20),
-                ForeColor = System.Drawing.Color.Red
-            };
-
-            // 控制按钮
-            Button btnStart = new Button()
-            {
-                Text = "开始连点",
-                Location = new System.Drawing.Point(20, 220),
-                Size = new System.Drawing.Size(80, 30)
-            };
-            btnStart.Click += (s, e) => StartClicking(lblStatus);
-
-            Button btnStop = new Button()
-            {
-                Text = "停止连点",
-                Location = new System.Drawing.Point(110, 220),
-                Size = new System.Drawing.Size(80, 30)
-            };
-            btnStop.Click += (s, e) => StopClicking(lblStatus);
-
-            // 信息提示
-            Label lblInfo = new Label()
-            {
-                Text = "提示: 按下设置的热键可快速启停连点\n设置热键: 点击'设置' -> 按下组合键 -> 点击'确认'",
-                Location = new System.Drawing.Point(20, 260),
-                Size = new System.Drawing.Size(350, 40),
-                ForeColor = System.Drawing.Color.Gray
-            };
-
-            // 添加所有控件到窗体
-            this.Controls.AddRange(new Control[] {
-                lblInterval, nudInterval,
-                lblButton, cmbButton,
-                lblHotkey, txtHotkey, btnSetHotkey, btnConfirmHotkey, btnCancelHotkey,
-                lblStatus,
-                btnStart, btnStop,
-                lblInfo
-            });
-        }
-
-        private void BtnSetHotkey_Click(object sender, EventArgs e)
-        {
-            isHotkeySetMode = true;
-            tempHotkey = Keys.None;
-            txtHotkey.Text = "按下组合键...";
-            txtHotkey.BackColor = System.Drawing.Color.Yellow;
-            btnSetHotkey.Enabled = false;
-            btnConfirmHotkey.Enabled = false;
-            btnCancelHotkey.Enabled = true;
-        }
-
-        private void BtnConfirmHotkey_Click(object sender, EventArgs e)
-        {
-            if (tempHotkey != Keys.None)
-            {
-                config.Hotkey = tempHotkey;
-                txtHotkey.Text = GetHotkeyString(config.Hotkey);
-                txtHotkey.BackColor = System.Drawing.SystemColors.Window;
-                isHotkeySetMode = false;
-                btnSetHotkey.Enabled = true;
-                btnConfirmHotkey.Enabled = false;
-                btnCancelHotkey.Enabled = false;
-                
-                ConfigManager.Save(config); // 保存配置
-            }
-        }
-
-        private void BtnCancelHotkey_Click(object sender, EventArgs e)
-        {
-            txtHotkey.Text = GetHotkeyString(config.Hotkey);
-            txtHotkey.BackColor = System.Drawing.SystemColors.Window;
-            isHotkeySetMode = false;
-            btnSetHotkey.Enabled = true;
-            btnConfirmHotkey.Enabled = false;
-            btnCancelHotkey.Enabled = false;
         }
 
         private string GetHotkeyString(Keys key)
         {
+            if (key == Keys.None)
+            {
+                return "未设置";
+            }
+
             string result = "";
-            
+
             if ((key & Keys.Control) == Keys.Control)
+            {
                 result += "Ctrl + ";
+            }
+
             if ((key & Keys.Shift) == Keys.Shift)
+            {
                 result += "Shift + ";
+            }
+
             if ((key & Keys.Alt) == Keys.Alt)
+            {
                 result += "Alt + ";
-            
-            // 获取按键名称（去掉修饰符）
+            }
+
             Keys actualKey = key & ~Keys.Modifiers;
             result += actualKey.ToString();
-            
+
             return result;
         }
 
-        private void StartClicking(Label statusLabel)
+        private void StartClicking()
         {
-            if (isRunning) return;
-            
+            if (isRunning)
+            {
+                return;
+            }
+
             isRunning = true;
-            statusLabel.Text = "状态: 运行中";
-            statusLabel.ForeColor = System.Drawing.Color.Green;
-            
+            startStopButton.Text = "停止连点";
+            Invalidate();
+
             cancellationTokenSource = new CancellationTokenSource();
-            
+
             clickThread = new Thread(async () =>
             {
                 while (!cancellationTokenSource.Token.IsCancellationRequested && isRunning)
@@ -286,10 +618,12 @@ namespace SimpleClicker
                     try
                     {
                         await Task.Delay(config.Interval, cancellationTokenSource.Token);
-                        
-                        if (!isRunning) break;
-                        
-                        // 执行点击操作
+
+                        if (!isRunning)
+                        {
+                            break;
+                        }
+
                         MouseController.Click(config.ClickButton);
                     }
                     catch (OperationCanceledException)
@@ -302,27 +636,62 @@ namespace SimpleClicker
             clickThread.Start();
         }
 
-        private void StopClicking(Label statusLabel)
+        private void StopClicking()
         {
-            if (!isRunning) return;
-            
+            if (!isRunning)
+            {
+                return;
+            }
+
             isRunning = false;
-            statusLabel.Text = "状态: 停止";
-            statusLabel.ForeColor = System.Drawing.Color.Red;
-            
-            cancellationTokenSource?.Cancel();
+            startStopButton.Text = "开始连点";
+            Invalidate();
+
+            if (cancellationTokenSource != null)
+            {
+                cancellationTokenSource.Cancel();
+            }
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            ConfigManager.Save(config); // 关闭前保存配置
-            keyboardHook?.Dispose();
-            StopClicking(null);
+            ConfigManager.Save(config);
+
+            if (keyboardHook != null)
+            {
+                keyboardHook.Dispose();
+            }
+
+            StopClicking();
             base.OnFormClosing(e);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && toolTip != null)
+            {
+                toolTip.Dispose();
+            }
+
+            base.Dispose(disposing);
+
+            if (disposing)
+            {
+                titleFont.Dispose();
+                subtitleFont.Dispose();
+                labelFont.Dispose();
+                smallFont.Dispose();
+                buttonFont.Dispose();
+                compactButtonFont.Dispose();
+                numberFont.Dispose();
+                statusFont.Dispose();
+                heroSubFont.Dispose();
+                sectionFont.Dispose();
+                footerFont.Dispose();
+            }
         }
     }
 
-    // 程序入口
     public class Program
     {
         [STAThread]

@@ -43,6 +43,12 @@
         <Compile Include="KeyboardHook.cs" />
         <Compile Include="MainForm.cs" />
         <Compile Include="MouseController.cs" />
+        <Compile Include="UI\HotkeyChip.cs" />
+        <Compile Include="UI\IntervalStepper.cs" />
+        <Compile Include="UI\SegmentControl.cs" />
+        <Compile Include="UI\Theme.cs" />
+        <Compile Include="UI\ThemedButton.cs" />
+        <Compile Include="UI\WindowIconButton.cs" />
     </ItemGroup>
     <ItemGroup>
       <Folder Include="Properties\" />
